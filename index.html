@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Visible Speed-Up Challenge - Ultimate Sound Fix</title>
+<style>
+body{margin:0;overflow:hidden;background:#000;touch-action:none;}
+canvas{display:block}
+</style>
+</head>
+
+<body>
+<canvas id="c"></canvas>
+
+<script>
+const c = document.getElementById("c");
+const x = c.getContext("2d");
+
+function resize(){ c.width=innerWidth; c.height=innerHeight; }
+window.addEventListener("resize",resize);
+resize();
+
+// --- حالة اللعبة ---
+let isGameStarted = false;
+
+let ground = 350;
+let spawn = {x:70, y:100}; 
+let p = { x:spawn.x, y:spawn.y, w:40, h:40, vy:0, g:0.6, jump:-12, onGround:false };
+
+let activeTouches = {}; 
+let highestTowerReached = 0; 
+let baseSpeed = 4.0;         
+let currentSpeed = 4.0; 
+let camX=0;
+let isGameOver = false; 
+let isGameWon = false; 
+
+// ⏳ متغيرات تعاقب الأيام
+let cycleTimer = 0; 
+let daysPlayed = 0; 
+const TOTAL_CYCLE = 130; 
+const cBlue = {r: 135, g: 206, b: 235};
+const cOrange = {r: 255, g: 90, b: 0};
+const cBlack = {r: 10, g: 10, b: 18};
+
+// 🌧️ الطقس والانفجار
+let rainDrops = [];
+let lightningFlash = 0;
+let particles = [];
+let hasExploded = false;
+
+// 🎵 [نظام الصوت المتقدم] 🎵
+let audioUnlocked = false; 
+const sndJump = new Audio('sounds/jump.mp3'); sndJump.volume = 0.3; 
+const sndExplode = new Audio('sounds/explode.mp3');
+const sndRespawn = new Audio('sounds/respawn.mp3');
+const sndRain = new Audio('sounds/rain.mp3'); sndRain.loop = true; sndRain.volume = 0.4;
+const sndThunder = new Audio('sounds/thunder.mp3'); sndThunder.volume = 0.6;
+const allSounds = [sndJump, sndExplode, sndRespawn, sndRain, sndThunder];
+
+function unlockAudio() {
+  if (!audioUnlocked) {
+    audioUnlocked = true;
+    allSounds.forEach(snd => {
+      snd.play().then(() => {
+        snd.pause();
+        snd.currentTime = 0;
+      }).catch(err => console.log("الأصوات بانتظار تفاعل المستخدم"));
+    });
+    setTimeout(() => playRespawnSound(), 100);
+  }
+}
+
+function playRespawnSound() { if(audioUnlocked) { sndRespawn.currentTime=0; sndRespawn.play().catch(e=>{}); } }
+function playJumpSound() { if(audioUnlocked) { sndJump.currentTime=0; sndJump.play().catch(e=>{}); } }
+function playExplodeSound() { if(audioUnlocked) { sndExplode.currentTime=0; sndExplode.play().catch(e=>{}); } }
+function playThunderSound() { if(audioUnlocked) { sndThunder.currentTime=0; sndThunder.play().catch(e=>{}); } }
+
+let towers=[];
+let traps=[];
+let currentX = 250;
+for(let i=0; i<10; i++){
+  let h = 100 + i*20; 
+  towers.push({id: i, x: currentX, y: ground-h, w: 80, h: h});
+  let nextGap = 150 + i * 15; 
+  if(i < 9) {
+    traps.push({x: currentX + 80, y: ground-5, w: nextGap - 80, h: 5});
+    currentX += nextGap;
+  }
+}
+
+let lastTower = towers[9];
+let finalChallengeGap = 392; 
+towers.push({ id: 10, x: lastTower.x + finalChallengeGap, y: lastTower.y, w: 80, h: lastTower.h });
+traps.push({x: lastTower.x + 80, y: ground-5, w: finalChallengeGap - 80, h: 5});
+
+let finalTower = towers[10];
+let portal = { x: finalTower.x + (finalTower.w - 45) / 2, y: finalTower.y - 75, w: 45, h: 75 };
+
+function resetGame() {
+  p.x = spawn.x; p.y = spawn.y; p.vy = 0;
+  highestTowerReached = 0; isGameOver = false; isGameWon = false;
+  particles = [];      
+  hasExploded = false; 
+  activeTouches = {};
+  playRespawnSound(); 
+}
+
+function lerpColor(c1, c2, f) {
+  return `rgb(${Math.round(c1.r + f*(c2.r-c1.r))}, ${Math.round(c1.g + f*(c2.g-c1.g))}, ${Math.round(c1.b + f*(c2.b-c1.b))})`;
+}
+
+function getSkyColor(t) {
+  if (t >= 0 && t < 60) return `rgb(${cBlue.r}, ${cBlue.g}, ${cBlue.b})`; 
+  if (t >= 60 && t < 62.5) return lerpColor(cBlue, cOrange, (t - 60) / 2.5); 
+  if (t >= 62.5 && t < 65) return lerpColor(cOrange, cBlack, (t - 62.5) / 2.5); 
+  if (t >= 65 && t < 125) return `rgb(${cBlack.r}, ${cBlack.g}, ${cBlack.b})`; 
+  if (t >= 125 && t < 127.5) return lerpColor(cBlack, cOrange, (t - 125) / 2.5); 
+  return lerpColor(cOrange, cBlue, (t - 127.5) / 2.5); 
+}
+
+function update(){
+  cycleTimer += 1/60;
+  if (cycleTimer >= TOTAL_CYCLE) {
+    cycleTimer = 0;
+    daysPlayed++; 
+  }
+
+  let isRaining = (daysPlayed > 0 && daysPlayed % 5 === 0 && cycleTimer < 30);
+  
+  if (isRaining) {
+    if (audioUnlocked && sndRain.paused) sndRain.play().catch(e => {});
+
+    for(let k=0; k<3; k++) {
+      rainDrops.push({ x: Math.random() * (c.width + 100) - 50, y: -20, speed: 12 + Math.random() * 6, len: 15 + Math.random() * 10 });
+    }
+    if (Math.random() < 0.006) {
+      lightningFlash = 6; 
+      playThunderSound(); 
+    }
+  } else {
+    if (!sndRain.paused) { sndRain.pause(); sndRain.currentTime = 0; }
+  }
+
+  for (let d of rainDrops) { d.y += d.speed; d.x += 1; }
+  rainDrops = rainDrops.filter(d => d.y < c.height + 20);
+  if (lightningFlash > 0) lightningFlash--;
+
+  for (let part of particles) { part.x += part.vx; part.y += part.vy; part.vy += 0.25; part.alpha -= 0.015; }
+  particles = particles.filter(part => part.alpha > 0);
+
+  if(isGameStarted) {
+      if (isGameOver && !hasExploded) {
+        hasExploded = true;
+        playExplodeSound(); 
+        for (let i = 0; i < 40; i++) {
+          particles.push({ x: p.x + p.w / 2, y: p.y + p.h / 2, vx: (Math.random() - 0.5) * 7, vy: (Math.random() - 0.5) * 7 - 4, size: 3 + Math.random() * 5, alpha: 1.0 });
+        }
+      }
+
+      if (!isGameOver && !isGameWon) {
+        let left = false, right = false, jump = false;
+        for(let id in activeTouches){
+          let t = activeTouches[id];
+          if(t.x < 100) left = true;
+          else if(t.x < 200) right = true;
+          else if(t.x > c.width-120) jump = true;
+        }
+
+        let wasOnGround = p.onGround;
+        if (!left && !right && p.onGround) highestTowerReached = 0;
+        currentSpeed = baseSpeed + (highestTowerReached * 0.35); 
+
+        if(right) p.x += currentSpeed;
+        if(left) p.x -= currentSpeed;
+        if(p.x < 40) { p.x = 40; }
+        
+        p.vy += p.g; p.y += p.vy; p.onGround = false;
+        if(p.y+p.h > ground){ p.y = ground-p.h; p.vy = 0; p.onGround = true; }
+
+        for(let t of towers){
+          if(p.x < t.x + t.w && p.x + p.w > t.x && p.y < t.y + t.h && p.y + p.h > t.y){
+              if(p.vy > 0 && p.y + p.h - p.vy <= t.y + 10){
+                  p.y = t.y - p.h; p.vy = 0; p.onGround = true;
+                  if(!wasOnGround && t.id > highestTowerReached && t.id !== 10) highestTowerReached = t.id;
+              } else {
+                  if(p.x + p.w/2 < t.x + t.w/2) p.x = t.x - p.w;
+                  else p.x = t.x + t.w;
+              }
+          }
+        }
+
+        if(jump && p.onGround){ p.vy = p.jump; p.onGround = false; playJumpSound(); }
+        
+        for(let t of traps){ if(p.x < t.x + t.w && p.x + p.w > t.x && p.y + p.h > t.y) isGameOver = true; }
+        if(p.x < portal.x + portal.w && p.x + p.w > portal.x && p.y < portal.y + portal.h && p.y + p.h > portal.y) isGameWon = true;
+        
+        camX = p.x - c.width/3;
+        if(camX < 0) camX = 0;
+      }
+  }
+}
+
+function draw(){
+  let isRaining = (daysPlayed > 0 && daysPlayed % 5 === 0 && cycleTimer < 30);
+  let skyColor = isRaining ? "rgb(90, 95, 105)" : getSkyColor(cycleTimer);
+  x.fillStyle = skyColor; x.fillRect(0, 0, c.width, c.height);
+  
+  let sunT = -1;
+  if (cycleTimer >= 125) sunT = cycleTimer - 125; 
+  else if (cycleTimer < 65) sunT = cycleTimer + 5; 
+
+  if (sunT !== -1) {
+    let angle = (sunT / 70) * Math.PI;
+    let sunX = c.width * 0.5 - Math.cos(angle) * (c.width * 0.35);
+    let sunY = ground - Math.sin(angle) * (ground * 0.65);
+    
+    if (isRaining) {
+      x.fillStyle = "rgba(255, 255, 255, 0.15)"; x.beginPath(); x.arc(sunX, sunY, 18, 0, Math.PI*2); x.fill();
+      x.fillStyle = "rgba(245, 245, 245, 0.75)"; x.beginPath(); x.arc(sunX, sunY, 9, 0, Math.PI*2); x.fill();
+    } else {
+      x.fillStyle = "rgba(255, 165, 0, 0.2)"; x.beginPath(); x.arc(sunX, sunY, 45, 0, Math.PI*2); x.fill();
+      x.fillStyle = "#FFD700"; x.beginPath(); x.arc(sunX, sunY, 26, 0, Math.PI*2); x.fill();
+    }
+  }
+
+  if (!isRaining && cycleTimer >= 60 && cycleTimer < 130) {
+    let moonT = cycleTimer - 60; let angle = (moonT / 70) * Math.PI;
+    let moonX = c.width * 0.5 - Math.cos(angle) * (c.width * 0.35); let moonY = ground - Math.sin(angle) * (ground * 0.65);
+    x.fillStyle = "rgba(255, 255, 255, 0.1)"; x.beginPath(); x.arc(moonX, moonY, 35, 0, Math.PI*2); x.fill();
+    x.fillStyle = "#F5F3CE"; x.beginPath(); x.arc(moonX, moonY, 20, 0, Math.PI*2); x.fill();
+    x.fillStyle = skyColor; x.beginPath(); x.arc(moonX + 7, moonY - 3, 17, 0, Math.PI*2); x.fill();
+  }
+
+  if (lightningFlash > 0) { x.fillStyle = "rgba(255, 255, 255, 0.35)"; x.fillRect(0, 0, c.width, c.height); }
+
+  x.save(); x.translate(-camX, 0);
+  x.fillStyle="#4CAF50"; x.fillRect(-1000, ground, 30000, c.height - ground);
+  x.fillStyle="gray"; for(let t of towers) x.fillRect(t.x, t.y, t.w, t.h);
+  x.fillStyle="red"; for(let t of traps) x.fillRect(t.x, t.y, t.w, t.h);
+  
+  x.fillStyle="#1e272e"; x.fillRect(0, -500, 40, ground + 500);
+  x.fillStyle="#2f3640"; x.fillRect(35, -500, 5, ground + 500); 
+  
+  x.fillStyle = "#9b59b6"; x.fillRect(portal.x, portal.y, portal.w, portal.h);
+  x.fillStyle = "#e0b0ff"; x.fillRect(portal.x + 6, portal.y + 6, portal.w - 12, portal.h - 12);
+  
+  if (!isGameOver) {
+    x.fillStyle="blue"; x.fillRect(p.x, p.y, p.w, p.h); 
+    x.fillStyle="black";
+    x.fillRect(p.x + 18, p.y + 12, 6, 15); 
+    x.fillRect(p.x + 30, p.y + 12, 6, 15); 
+  }
+
+  for (let part of particles) { x.fillStyle = `rgba(30, 144, 255, ${part.alpha})`; x.fillRect(part.x, part.y, part.size, part.size); }
+  x.restore();
+  
+  x.strokeStyle = "rgba(174, 219, 255, 0.45)"; x.lineWidth = 1.5;
+  for (let d of rainDrops) { x.beginPath(); x.moveTo(d.x, d.y); x.lineTo(d.x + 1.5, d.y + d.len); x.stroke(); }
+
+  // --- رسم أزرار التحكم (أسهم سوداء احترافية) ---
+  if(isGameStarted && !isGameOver && !isGameWon) {
+      x.fillStyle = "black"; 
+      // تم رفع الأزرار للأعلى بزيادة القيمة المطروحة من c.height
+      let h = c.height - 150; 
+
+      // 1. سهم اليسار
+      x.beginPath();
+      x.moveTo(70, h+30); x.lineTo(30, h+60); x.lineTo(70, h+90);
+      x.closePath(); x.fill();
+
+      // 2. سهم اليمين
+      x.beginPath();
+      x.moveTo(110, h+30); x.lineTo(150, h+60); x.lineTo(110, h+90);
+      x.closePath(); x.fill();
+
+      // 3. سهم القفز (لأعلى)
+      x.beginPath();
+      x.moveTo(c.width - 90, h+90); x.lineTo(c.width - 60, h+40); x.lineTo(c.width - 30, h+90);
+      x.closePath(); x.fill();
+  }
+
+  if(isGameStarted) {
+      if (isRaining) { x.fillStyle = "white"; } 
+      else { x.fillStyle = (cycleTimer >= 65 && cycleTimer < 125) ? "white" : "black"; }
+      x.font = "bold 16px Arial"; x.textAlign = "left";
+      x.fillText("Current Speed: " + currentSpeed.toFixed(2), 20, 40);
+      x.fillText("Current Tower: " + highestTowerReached, 20, 70);
+      x.fillText("Days Survived: " + daysPlayed, 20, 100); 
+  }
+
+  if (isGameOver) {
+    x.fillStyle = "rgba(0, 0, 0, 0.4)"; x.fillRect(0, 0, c.width, c.height);
+    x.fillStyle = "white"; x.font = "bold 36px Arial"; x.textAlign = "center"; x.fillText("Game Over", c.width / 2, c.height / 2 - 30);
+    x.fillStyle = "#FF5722"; let btnW = 160; let btnH = 45; let btnX = c.width / 2 - btnW / 2; let btnY = c.height / 2 + 15;
+    x.fillRect(btnX, btnY, btnW, btnH); x.fillStyle = "white"; x.font = "bold 18px Arial"; x.fillText("Play Again", c.width / 2, btnY + 28);
+  }
+
+  if (isGameWon) {
+    x.fillStyle = "rgba(0, 0, 0, 0.88)"; x.fillRect(0, 0, c.width, c.height);
+    x.fillStyle = "#FFD700"; x.font = "bold 44px Arial"; x.textAlign = "center"; x.fillText("You Won", c.width / 2, c.height / 2 - 60);
+    x.fillStyle = "#ffffff"; x.font = "italic 20px Arial"; x.fillText("We appreciate your effort", c.width / 2, c.height / 2 - 15);
+    x.fillStyle = "#ff4d4d"; x.font = "bold 22px Arial"; x.fillText("You escaped them!", c.width / 2, c.height / 2 + 25);
+    x.fillStyle = "#4CAF50"; let btnW = 160; let btnH = 45; let btnX = c.width / 2 - btnW / 2; let btnY = c.height / 2 + 70;
+    x.fillRect(btnX, btnY, btnW, btnH); x.fillStyle = "white"; x.font = "bold 18px Arial"; x.fillText("Play Again", c.width / 2, btnY + 28);
+  }
+
+  if (!isGameStarted) {
+    x.fillStyle = "rgba(0, 0, 0, 0.7)"; x.fillRect(0, 0, c.width, c.height);
+    x.fillStyle = "white"; x.font = "bold 40px Arial"; x.textAlign = "center"; x.fillText("START GAME", c.width / 2, c.height / 2 - 20);
+    x.fillStyle = "#4CAF50"; let btnW = 160; let btnH = 45; let btnX = c.width / 2 - btnW / 2; let btnY = c.height / 2 + 10;
+    x.fillRect(btnX, btnY, btnW, btnH); x.fillStyle = "white"; x.font = "bold 18px Arial"; x.fillText("PLAY", c.width / 2, btnY + 30);
+  }
+}
+
+function loop(){ update(); draw(); requestAnimationFrame(loop); }
+loop();
+
+window.addEventListener("pointerdown", e => {
+  unlockAudio(); 
+  if (!isGameStarted) {
+    let btnW = 160; let btnH = 45; let btnX = c.width / 2 - btnW / 2;
+    let btnY = c.height / 2 + 10;
+    if (e.clientX >= btnX && e.clientX <= btnX + btnW && e.clientY >= btnY && e.clientY <= btnY + btnH) {
+        isGameStarted = true;
+    }
+    return;
+  }
+  if (isGameOver || isGameWon) {
+    let btnW = 160; let btnH = 45; let btnX = c.width / 2 - btnW / 2;
+    let btnY = isGameOver ? (c.height / 2 + 15) : (c.height / 2 + 70);
+    if (e.clientX >= btnX && e.clientX <= btnX + btnW && e.clientY >= btnY && e.clientY <= btnY + btnH) resetGame();
+    return;
+  }
+  activeTouches[e.pointerId] = {x: e.clientX, y: e.clientY}; 
+});
+
+window.addEventListener("pointermove", e => { if(isGameStarted && !isGameOver && !isGameWon && activeTouches[e.pointerId]) activeTouches[e.pointerId] = {x: e.clientX, y: e.clientY}; });
+window.addEventListener("pointerup", e => { delete activeTouches[e.pointerId]; });
+window.addEventListener("pointercancel", e => { delete activeTouches[e.pointerId]; });
+</script>
+</body>
+</html>
